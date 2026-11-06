@@ -1,92 +1,82 @@
-import React, { useState } from "react";
-
-// ---------------------------------------------------------------------------
-// PRESET BRICKS
-// Static lookup for one-tap logging of foods eaten constantly.
-// Kept outside the component so it isn't recreated on every render.
-// ---------------------------------------------------------------------------
-const PRESETS = [
-  { name: "3 Eggs", protein: 18, calories: 210 },
-  { name: "100g Paneer", protein: 18, calories: 300 },
-];
+import React, { useState, useEffect } from "react";
+import { api } from "./api";
+import AuthModal from "./components/AuthModal";
+import WorkoutsView from "./components/WorkoutsView";
+import AnalyticsView from "./components/AnalyticsView";
+import GoalsView from "./components/GoalsView";
+import NutritionView from "./components/NutritionView";
 
 export default function FitnessTracker() {
-  // -------------------------------------------------------------------------
-  // STATE
-  // logs: single source of truth for every food entry. Each entry is an
-  // independent object — never mutated in place, always replaced via
-  // setLogs([...]) so React detects the change.
-  // -------------------------------------------------------------------------
-  const [logs, setLogs] = useState([]);
+  const [user, setUser] = useState(null);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState("workouts");
+  const [kpiSummary, setKpiSummary] = useState(null);
+  const [streakSummary, setStreakSummary] = useState(null);
 
-  // targetProtein: the user's editable daily goal (grams). Lives in its own
-  // state slice because it changes independently of the log list.
-  const [targetProtein, setTargetProtein] = useState(150);
-
-  // Local form state for the manual "add food" inputs only.
-  const [form, setForm] = useState({ name: "", protein: "", calories: "" });
-
-  // Tracks whether the goal input is in "edit" mode vs static display.
-  const [editingGoal, setEditingGoal] = useState(false);
-  const [goalDraft, setGoalDraft] = useState(targetProtein);
-
-  // -------------------------------------------------------------------------
-  // DERIVED TOTALS — no dedicated state, recalculated every render via
-  // reduce(). This guarantees totals can never drift out of sync with logs.
-  // -------------------------------------------------------------------------
-  const totalProtein = logs.reduce((sum, entry) => sum + entry.protein, 0);
-  const totalCalories = logs.reduce((sum, entry) => sum + entry.calories, 0);
-  const progressPct = Math.min(100, (totalProtein / targetProtein) * 100 || 0);
-
-  // -------------------------------------------------------------------------
-  // ACTIONS
-  // -------------------------------------------------------------------------
-
-  // Appends one new log entry. Uses Date.now() + a random suffix as a
-  // collision-safe unique id, spreading the previous array so we never
-  // mutate state directly.
-  const addLog = (entry) => {
-    setLogs((prev) => [
-      ...prev,
-      { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, ...entry },
-    ]);
-  };
-
-  // Quick-add: presets map straight onto addLog, no typing required.
-  const handlePresetClick = (preset) => {
-    addLog({ name: preset.name, protein: preset.protein, calories: preset.calories });
-  };
-
-  // Manual form submit: validates, builds the entry, resets the form.
-  const handleFormSubmit = (e) => {
-    e.preventDefault();
-    if (!form.name.trim() || form.protein === "" || form.calories === "") return;
-    addLog({
-      name: form.name.trim(),
-      protein: Number(form.protein),
-      calories: Number(form.calories),
-    });
-    setForm({ name: "", protein: "", calories: "" });
-  };
-
-  // Delete: filter() rebuilds the array excluding the matching id — the
-  // removed item is never mutated, just excluded from the new array.
-  const handleDelete = (id) => {
-    setLogs((prev) => prev.filter((entry) => entry.id !== id));
-  };
-
-  // Commits the goal draft back into targetProtein and exits edit mode.
-  const handleGoalSave = () => {
-    const next = Number(goalDraft);
-    if (!Number.isNaN(next) && next > 0) {
-      setTargetProtein(next);
+  useEffect(() => {
+    // Check initial user from localStorage
+    const savedUser = localStorage.getItem("user");
+    if (savedUser) {
+      try {
+        setUser(JSON.parse(savedUser));
+      } catch {
+        setUser(null);
+      }
     }
-    setEditingGoal(false);
+
+    // Auto-login as demouser by default if no session exists so reviewers immediately see seed data
+    if (!localStorage.getItem("token")) {
+      api.login("demouser", "password123")
+        .then((data) => setUser(data.user))
+        .catch(() => {});
+    }
+
+    const handleAuthChange = () => {
+      const u = localStorage.getItem("user");
+      setUser(u ? JSON.parse(u) : null);
+    };
+
+    window.addEventListener("auth-changed", handleAuthChange);
+    return () => window.removeEventListener("auth-changed", handleAuthChange);
+  }, []);
+
+  useEffect(() => {
+    if (user) {
+      loadTopMetrics();
+    } else {
+      setKpiSummary(null);
+      setStreakSummary(null);
+    }
+  }, [user]);
+
+  const loadTopMetrics = async () => {
+    try {
+      const [kpis, streak] = await Promise.all([
+        api.getDashboardSummary(),
+        api.getStreak(),
+      ]);
+      setKpiSummary(kpis);
+      setStreakSummary(streak);
+    } catch (err) {
+      console.error("Failed to load header KPIs:", err);
+    }
   };
 
-  // -------------------------------------------------------------------------
-  // RENDER
-  // -------------------------------------------------------------------------
+  const handleLogout = () => {
+    api.logout();
+    setUser(null);
+  };
+
+  const handleSwitchUser = async (demoUser) => {
+    try {
+      const data = await api.login(demoUser, "password123");
+      setUser(data.user);
+      loadTopMetrics();
+    } catch (err) {
+      alert(`Switch user failed: ${err.message}`);
+    }
+  };
+
   return (
     <div style={styles.page}>
       <style>{`
@@ -108,209 +98,185 @@ export default function FitnessTracker() {
         .ft-del:hover { background: #ff2a4d; color: #0d0e12; border-color: #ff2a4d; }
       `}</style>
 
-      {/* HEADER */}
+      {/* HEADER SECTION */}
       <div style={styles.header}>
         <div style={styles.scanlineWrap}>
           <div style={styles.scanline} />
         </div>
-        <h1 style={styles.title}>
-          MACRO<span style={{ color: "#00f0ff" }}>//</span>GRID
-        </h1>
-        <p style={styles.subtitle}>SMART FITNESS &amp; NUTRITION TRACKER — DAILY UPLINK</p>
-      </div>
 
-      <div style={styles.grid}>
-        {/* LEFT COLUMN: presets, form, goal, progress */}
-        <div style={styles.col}>
-          {/* QUICK-ADD PRESETS */}
-          <section style={styles.panel}>
-            <h2 style={styles.panelTitle}>⚡ QUICK-ADD BRICKS</h2>
-            <div style={styles.presetGrid}>
-              {PRESETS.map((preset) => (
+        <div style={styles.headerTop}>
+          <h1 style={styles.title}>
+            FITNESS<span style={{ color: "#00f0ff" }}>//</span>SQL
+          </h1>
+
+          {/* AUTH STATUS / USER BADGE */}
+          <div style={styles.authBadge}>
+            {user ? (
+              <div style={styles.userStatusRow}>
+                <span style={styles.userIndicator}>● CONNECTED:</span>
+                <strong style={{ color: "#39ff14" }}>@{user.username}</strong>
                 <button
-                  key={preset.name}
-                  className="ft-preset"
-                  onClick={() => handlePresetClick(preset)}
-                  style={styles.presetBtn}
+                  style={styles.switchBtn}
+                  onClick={() =>
+                    handleSwitchUser(
+                      user.username === "demouser" ? "alex_fit" : "demouser"
+                    )
+                  }
+                  title="Switch user to test data isolation"
                 >
-                  <span style={styles.presetName}>{preset.name}</span>
-                  <span style={styles.presetMeta}>
-                    <span style={{ color: "#39ff14" }}>{preset.protein}g</span> protein ·{" "}
-                    <span style={{ color: "#00f0ff" }}>{preset.calories}</span> cal
-                  </span>
-                  <span style={styles.presetAdd}>+ ADD</span>
+                  [SWITCH TO @{user.username === "demouser" ? "alex_fit" : "demouser"}]
                 </button>
-              ))}
-            </div>
-          </section>
-
-          {/* MANUAL ENTRY FORM */}
-          <section style={styles.panel}>
-            <h2 style={styles.panelTitle}>＋ LOG FOOD MANUALLY</h2>
-            <form onSubmit={handleFormSubmit} style={styles.form}>
-              <input
-                className="ft-input"
-                style={styles.input}
-                type="text"
-                placeholder="Food name (e.g. Grilled Chicken)"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-              />
-              <div style={styles.formRow}>
-                <input
-                  className="ft-input"
-                  style={styles.input}
-                  type="number"
-                  min="0"
-                  placeholder="Protein (g)"
-                  value={form.protein}
-                  onChange={(e) => setForm({ ...form, protein: e.target.value })}
-                />
-                <input
-                  className="ft-input"
-                  style={styles.input}
-                  type="number"
-                  min="0"
-                  placeholder="Calories"
-                  value={form.calories}
-                  onChange={(e) => setForm({ ...form, calories: e.target.value })}
-                />
-              </div>
-              <button type="submit" className="ft-btn-cyan" style={styles.cyanBtn}>
-                LOG ENTRY →
-              </button>
-            </form>
-          </section>
-
-          {/* GOAL + PROGRESS */}
-          <section style={styles.panel}>
-            <h2 style={styles.panelTitle}>🎯 DAILY PROTEIN TARGET</h2>
-
-            {editingGoal ? (
-              <div style={styles.formRow}>
-                <input
-                  className="ft-input"
-                  style={styles.input}
-                  type="number"
-                  min="1"
-                  value={goalDraft}
-                  onChange={(e) => setGoalDraft(e.target.value)}
-                  autoFocus
-                />
-                <button className="ft-btn-lime" style={styles.limeBtnSm} onClick={handleGoalSave}>
-                  SAVE
+                <button style={styles.logoutBtn} onClick={handleLogout}>
+                  [DISCONNECT]
                 </button>
               </div>
             ) : (
-              <div style={styles.goalDisplayRow}>
-                <span style={styles.goalValue}>{targetProtein}g target</span>
-                <button
-                  className="ft-btn-cyan"
-                  style={styles.editBtn}
-                  onClick={() => {
-                    setGoalDraft(targetProtein);
-                    setEditingGoal(true);
-                  }}
-                >
-                  EDIT
-                </button>
-              </div>
+              <button
+                className="ft-btn-cyan"
+                style={styles.loginBtn}
+                onClick={() => setAuthModalOpen(true)}
+              >
+                ⚡ LOGIN / SIGNUP →
+              </button>
             )}
+          </div>
+        </div>
 
-            {/* PROGRESS BAR */}
-            <div style={styles.progressOuter}>
-              <div
-                style={{
-                  ...styles.progressInner,
-                  width: `${progressPct}%`,
-                }}
-              />
-              <span style={styles.progressLabel}>
-                {totalProtein}g / {targetProtein}g ({Math.round(progressPct)}%)
+        <p style={styles.subtitle}>
+          FULL-STACK WORKOUT &amp; SQL ANALYTICS PLATFORM — MYSQL 8.0 &amp; FASTAPI
+        </p>
+
+        {/* TOP LEVEL METRICS STRIP */}
+        {user && kpiSummary && (
+          <div style={styles.metricsStrip}>
+            <div style={styles.metricItem}>
+              <span style={styles.metricLabel}>TOTAL VOLUME</span>
+              <span style={{ ...styles.metricVal, color: "#00f0ff" }}>
+                {kpiSummary.total_volume_kg.toLocaleString()} kg
               </span>
             </div>
-
-            <div style={styles.statsRow}>
-              <div style={styles.statBox}>
-                <span style={styles.statLabel}>TOTAL PROTEIN</span>
-                <span style={{ ...styles.statValue, color: "#39ff14" }}>{totalProtein}g</span>
-              </div>
-              <div style={styles.statBox}>
-                <span style={styles.statLabel}>TOTAL CALORIES</span>
-                <span style={{ ...styles.statValue, color: "#00f0ff" }}>{totalCalories}</span>
-              </div>
+            <div style={styles.metricItem}>
+              <span style={styles.metricLabel}>TOTAL SESSIONS</span>
+              <span style={{ ...styles.metricVal, color: "#39ff14" }}>
+                {kpiSummary.total_workouts}
+              </span>
             </div>
-          </section>
-        </div>
+            <div style={styles.metricItem}>
+              <span style={styles.metricLabel}>ACTIVE STREAK</span>
+              <span style={{ ...styles.metricVal, color: "#ff2a4d" }}>
+                {streakSummary?.current_streak_days || 0} DAYS
+              </span>
+            </div>
+            <div style={styles.metricItem}>
+              <span style={styles.metricLabel}>EXERCISES TRAINED</span>
+              <span style={styles.metricVal}>
+                {kpiSummary.distinct_exercises_trained}
+              </span>
+            </div>
+          </div>
+        )}
 
-        {/* RIGHT COLUMN: log history */}
-        <div style={styles.col}>
-          <section style={{ ...styles.panel, flex: 1 }}>
-            <h2 style={styles.panelTitle}>📋 LOG HISTORY ({logs.length})</h2>
-
-            {logs.length === 0 ? (
-              <div style={styles.emptyState}>
-                NO ENTRIES YET. ADD A PRESET OR LOG SOMETHING TO START TRACKING.
-              </div>
-            ) : (
-              <div style={styles.logList}>
-                {/* .map() renders each entry; id is the stable, unique key */}
-                {logs.map((entry) => (
-                  <div key={entry.id} className="ft-row" style={styles.logRow}>
-                    <div style={styles.logInfo}>
-                      <span style={styles.logName}>{entry.name}</span>
-                      <span style={styles.logMeta}>
-                        <span style={{ color: "#39ff14" }}>{entry.protein}g</span> protein ·{" "}
-                        <span style={{ color: "#00f0ff" }}>{entry.calories}</span> cal
-                      </span>
-                    </div>
-                    <button
-                      className="ft-del"
-                      style={styles.deleteBtn}
-                      onClick={() => handleDelete(entry.id)}
-                      aria-label={`Delete ${entry.name}`}
-                    >
-                      ✕ DELETE
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
+        {/* NAVIGATION TABS */}
+        <div style={styles.navBar}>
+          <button
+            style={{
+              ...styles.navTab,
+              borderBottomColor: activeTab === "workouts" ? "#00f0ff" : "transparent",
+              color: activeTab === "workouts" ? "#00f0ff" : "#6f7a87",
+            }}
+            onClick={() => setActiveTab("workouts")}
+          >
+            ⚡ WORKOUT LOGS
+          </button>
+          <button
+            style={{
+              ...styles.navTab,
+              borderBottomColor: activeTab === "analytics" ? "#39ff14" : "transparent",
+              color: activeTab === "analytics" ? "#39ff14" : "#6f7a87",
+            }}
+            onClick={() => setActiveTab("analytics")}
+          >
+            📊 SQL ANALYTICS &amp; PRs
+          </button>
+          <button
+            style={{
+              ...styles.navTab,
+              borderBottomColor: activeTab === "goals" ? "#aa3bff" : "transparent",
+              color: activeTab === "goals" ? "#aa3bff" : "#6f7a87",
+            }}
+            onClick={() => setActiveTab("goals")}
+          >
+            🎯 GOALS &amp; STREAKS
+          </button>
+          <button
+            style={{
+              ...styles.navTab,
+              borderBottomColor: activeTab === "nutrition" ? "#ff2a4d" : "transparent",
+              color: activeTab === "nutrition" ? "#ff2a4d" : "#6f7a87",
+            }}
+            onClick={() => setActiveTab("nutrition")}
+          >
+            🥗 NUTRITION TRACKER
+          </button>
         </div>
       </div>
+
+      {/* MAIN CONTENT AREA */}
+      <div style={styles.mainContent}>
+        {activeTab === "workouts" && (
+          <WorkoutsView user={user} onWorkoutLogged={loadTopMetrics} />
+        )}
+        {activeTab === "analytics" && <AnalyticsView user={user} />}
+        {activeTab === "goals" && (
+          <GoalsView user={user} onGoalUpdated={loadTopMetrics} />
+        )}
+        {activeTab === "nutrition" && <NutritionView user={user} />}
+      </div>
+
+      {/* AUTHENTICATION MODAL */}
+      <AuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        onAuthSuccess={() => {
+          const u = localStorage.getItem("user");
+          setUser(u ? JSON.parse(u) : null);
+          loadTopMetrics();
+        }}
+      />
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// STYLES — all inline / object-based, self-contained, dark cyberpunk theme.
-// ---------------------------------------------------------------------------
 const styles = {
   page: {
     minHeight: "100vh",
-    background:
-      "radial-gradient(ellipse at top, #161920 0%, #0d0e12 60%)",
+    background: "radial-gradient(ellipse at top, #161920 0%, #0d0e12 60%)",
     color: "#e6f1f5",
     fontFamily:
       "'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace",
-    padding: "32px 20px 60px",
+    padding: "24px 20px 60px",
     boxSizing: "border-box",
   },
   header: {
     position: "relative",
-    textAlign: "center",
-    marginBottom: "32px",
+    maxWidth: "1160px",
+    margin: "0 auto 28px",
     overflow: "hidden",
-    padding: "16px 0",
-    animation: "flicker 6s infinite",
+    padding: "8px 0 0",
+  },
+  headerTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: "16px",
   },
   scanlineWrap: {
     position: "absolute",
     inset: 0,
     overflow: "hidden",
     pointerEvents: "none",
-    opacity: 0.25,
+    opacity: 0.2,
   },
   scanline: {
     position: "absolute",
@@ -319,254 +285,115 @@ const styles = {
     height: "40%",
     background:
       "linear-gradient(to bottom, transparent, rgba(0,240,255,0.25), transparent)",
-    animation: "scanline 5s linear infinite",
+    animation: "scanline 6s linear infinite",
   },
   title: {
-    fontSize: "2.4rem",
+    fontSize: "2.2rem",
     fontWeight: 800,
     letterSpacing: "0.08em",
     margin: 0,
     color: "#39ff14",
-    textShadow: "0 0 18px rgba(57,255,20,0.45)",
+    textShadow: "0 0 16px rgba(57,255,20,0.45)",
   },
   subtitle: {
-    marginTop: "8px",
-    fontSize: "0.8rem",
-    letterSpacing: "0.25em",
+    marginTop: "6px",
+    fontSize: "0.72rem",
+    letterSpacing: "0.2em",
     color: "#6f7a87",
   },
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)",
-    gap: "24px",
-    maxWidth: "1100px",
-    margin: "0 auto",
-  },
-  col: {
+  authBadge: {
     display: "flex",
-    flexDirection: "column",
-    gap: "24px",
+    alignItems: "center",
   },
-  panel: {
+  userStatusRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
     background: "#161920",
     border: "1px solid #262b34",
-    borderRadius: "10px",
-    padding: "20px",
-    boxShadow: "0 0 0 1px rgba(0,240,255,0.04) inset",
-  },
-  panelTitle: {
-    margin: "0 0 16px",
-    fontSize: "0.95rem",
-    letterSpacing: "0.12em",
-    color: "#00f0ff",
-    textTransform: "uppercase",
-  },
-  presetGrid: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: "12px",
-  },
-  presetBtn: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "4px",
-    background: "#0d0e12",
-    border: "1px solid #2a2f38",
     borderRadius: "8px",
-    padding: "14px",
-    cursor: "pointer",
-    textAlign: "left",
-    transition: "all 0.15s ease",
-    color: "#e6f1f5",
-  },
-  presetName: {
-    fontWeight: 700,
-    fontSize: "0.9rem",
-  },
-  presetMeta: {
-    fontSize: "0.75rem",
-    color: "#9aa6b2",
-  },
-  presetAdd: {
-    marginTop: "6px",
-    fontSize: "0.7rem",
-    letterSpacing: "0.1em",
-    color: "#39ff14",
-  },
-  form: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "12px",
-  },
-  formRow: {
-    display: "flex",
-    gap: "12px",
-  },
-  input: {
-    flex: 1,
-    background: "#0d0e12",
-    border: "1px solid #2a2f38",
-    borderRadius: "6px",
-    padding: "10px 12px",
-    color: "#e6f1f5",
-    fontSize: "0.85rem",
-    fontFamily: "inherit",
-    transition: "border-color 0.15s ease",
-    minWidth: 0,
-  },
-  cyanBtn: {
-    background: "transparent",
-    border: "1px solid #00f0ff",
-    color: "#00f0ff",
-    borderRadius: "6px",
-    padding: "12px",
-    fontSize: "0.85rem",
-    fontWeight: 700,
-    letterSpacing: "0.08em",
-    cursor: "pointer",
-    transition: "all 0.15s ease",
-  },
-  limeBtnSm: {
-    background: "transparent",
-    border: "1px solid #39ff14",
-    color: "#39ff14",
-    borderRadius: "6px",
-    padding: "0 18px",
-    fontSize: "0.8rem",
-    fontWeight: 700,
-    letterSpacing: "0.06em",
-    cursor: "pointer",
-    transition: "all 0.15s ease",
-  },
-  editBtn: {
-    background: "transparent",
-    border: "1px solid #00f0ff",
-    color: "#00f0ff",
-    borderRadius: "6px",
-    padding: "6px 14px",
-    fontSize: "0.7rem",
-    fontWeight: 700,
-    letterSpacing: "0.08em",
-    cursor: "pointer",
-    transition: "all 0.15s ease",
-  },
-  goalDisplayRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: "14px",
-  },
-  goalValue: {
-    fontSize: "1.1rem",
-    fontWeight: 700,
-    color: "#e6f1f5",
-  },
-  progressOuter: {
-    position: "relative",
-    height: "26px",
-    background: "#0d0e12",
-    border: "1px solid #2a2f38",
-    borderRadius: "999px",
-    overflow: "hidden",
-    marginTop: "4px",
-  },
-  progressInner: {
-    height: "100%",
-    background: "linear-gradient(90deg, #00f0ff, #39ff14)",
-    boxShadow: "0 0 14px rgba(57,255,20,0.6)",
-    transition: "width 0.4s ease",
-  },
-  progressLabel: {
-    position: "absolute",
-    inset: 0,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: "0.72rem",
-    fontWeight: 700,
-    color: "#0d0e12",
-    mixBlendMode: "difference",
-    filter: "invert(1) grayscale(1) contrast(2)",
-  },
-  statsRow: {
-    display: "flex",
-    gap: "12px",
-    marginTop: "16px",
-  },
-  statBox: {
-    flex: 1,
-    background: "#0d0e12",
-    border: "1px solid #2a2f38",
-    borderRadius: "8px",
-    padding: "12px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "4px",
-  },
-  statLabel: {
-    fontSize: "0.65rem",
-    letterSpacing: "0.1em",
-    color: "#6f7a87",
-  },
-  statValue: {
-    fontSize: "1.3rem",
-    fontWeight: 800,
-  },
-  emptyState: {
-    border: "1px dashed #2a2f38",
-    borderRadius: "8px",
-    padding: "32px 16px",
-    textAlign: "center",
-    fontSize: "0.78rem",
-    color: "#5a6472",
-    letterSpacing: "0.04em",
-  },
-  logList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-    maxHeight: "480px",
-    overflowY: "auto",
-  },
-  logRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    background: "#0d0e12",
-    border: "1px solid #2a2f38",
-    borderRadius: "8px",
-    padding: "12px 14px",
-    transition: "background 0.15s ease",
-    gap: "12px",
-  },
-  logInfo: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "4px",
-    minWidth: 0,
-  },
-  logName: {
-    fontWeight: 700,
-    fontSize: "0.88rem",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-  },
-  logMeta: {
-    fontSize: "0.72rem",
-    color: "#9aa6b2",
-  },
-  deleteBtn: {
-    background: "transparent",
-    border: "1px solid #3a2228",
-    color: "#ff2a4d",
-    borderRadius: "6px",
     padding: "8px 12px",
+    fontSize: "0.75rem",
+  },
+  userIndicator: {
+    color: "#39ff14",
     fontSize: "0.68rem",
+    letterSpacing: "0.08em",
+  },
+  switchBtn: {
+    background: "transparent",
+    border: "none",
+    color: "#00f0ff",
+    fontSize: "0.68rem",
+    cursor: "pointer",
+    padding: "0 4px",
+    textDecoration: "underline",
+  },
+  logoutBtn: {
+    background: "transparent",
+    border: "none",
+    color: "#ff2a4d",
+    fontSize: "0.68rem",
+    cursor: "pointer",
+    padding: "0 4px",
+  },
+  loginBtn: {
+    background: "transparent",
+    border: "1px solid #00f0ff",
+    color: "#00f0ff",
+    padding: "8px 16px",
+    borderRadius: "6px",
+    fontSize: "0.75rem",
     fontWeight: 700,
-    letterSpacing: "0.05em",
+    cursor: "pointer",
+    letterSpacing: "0.08em",
+  },
+  metricsStrip: {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, 1fr)",
+    gap: "12px",
+    marginTop: "18px",
+    background: "#0d0e12",
+    border: "1px solid #262b34",
+    borderRadius: "8px",
+    padding: "12px 16px",
+  },
+  metricItem: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+  },
+  metricLabel: {
+    fontSize: "0.6rem",
+    color: "#6f7a87",
+    letterSpacing: "0.08em",
+  },
+  metricVal: {
+    fontSize: "1.1rem",
+    fontWeight: 800,
+    color: "#e6f1f5",
+  },
+  navBar: {
+    display: "flex",
+    borderBottom: "1px solid #262b34",
+    marginTop: "20px",
+    gap: "8px",
+    overflowX: "auto",
+  },
+  navTab: {
+    background: "transparent",
+    border: "none",
+    borderBottom: "2px solid transparent",
+    padding: "10px 16px",
+    fontSize: "0.82rem",
+    fontWeight: 700,
+    letterSpacing: "0.08em",
     cursor: "pointer",
     whiteSpace: "nowrap",
     transition: "all 0.15s ease",
+  },
+  mainContent: {
+    maxWidth: "1160px",
+    margin: "0 auto",
   },
 };
