@@ -1,4 +1,4 @@
-# Fitness Tracker (Full-Stack SQL Focus)
+# Fitness Tracker
 
 > An intermediate full-stack fitness and workout tracking web application designed specifically to showcase **advanced SQL design, normalization, relational integrity, ACID transactions, and analytical queries** for technical interviews.
 
