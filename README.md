@@ -1,7 +1,8 @@
 # Fitness Tracker
 
+A full-stack workout and nutrition tracker. Users sign up, log workouts as sets of exercises (reps and weight), track meals and protein, set goals, and view progress dashboards: weekly training volume, personal records, workout streaks, and goal progress.
 
----
+The React frontend talks to a FastAPI REST API backed by a normalized MySQL database. The analytics are written in SQL (views, window functions, CTEs, correlated subqueries).
 
 ## 🛠 Tech Stack
 
@@ -9,7 +10,7 @@
 | :--- | :--- | :--- |
 | **Frontend** | React 19 + Vite | JavaScript (no TypeScript, no Redux, no Tailwind) |
 | **Data Viz** | Recharts | Weekly volume bars, workout frequency, progression lines |
-| **Backend** | FastAPI (Python 3.12) | RESTful API, asynchronous performance, automatic Swagger docs |
+| **Backend** | FastAPI (Python 3.10+) | RESTful API, Pydantic validation, automatic Swagger docs |
 | **Database ORM** | SQLAlchemy 2.0 + PyMySQL | ORM used for basic CRUD; raw SQL used for analytics |
 | **Database** | MySQL 8.0+ | InnoDB engine, normalized to 3NF, constraints, and views |
 | **Authentication** | JWT (PyJWT) + Bcrypt | Salted password hashing, bearer token authorization |
@@ -18,7 +19,7 @@
 
 ## 📐 Database Architecture & Schema Explanation
 
-The schema is defined in [`backend/schema.sql`](backend/schema.sql), which acts as the **single source of truth** for all tables, constraints, indexes, and views. The SQLAlchemy models in [`backend/models.py`](backend/models.py) mirror it exactly.
+The schema is defined in [`backend/schema.sql`](backend/schema.sql), which acts as the **single source of truth** for all tables, constraints, indexes, and views. The SQLAlchemy models in [`backend/models.py`](backend/models.py) mirror it.
 
 ### Entity-Relationship Diagram
 
@@ -28,7 +29,7 @@ erDiagram
     USERS ||--o{ GOALS : "sets"
     USERS ||--o{ NUTRITION_LOGS : "records"
     WORKOUTS ||--|{ WORKOUT_SETS : "contains"
-    EXERCISES ||--o{ WORKOUT_SETS : "classified_under"
+    EXERCISES ||--o{ WORKOUT_SETS : "performed_in"
     EXERCISES ||--o{ GOALS : "targeted_by"
 
     USERS {
@@ -97,37 +98,37 @@ erDiagram
 
 2. **`exercises`**:
    - Master catalog of exercises categorized by muscle group (`Chest`, `Back`, `Legs`, `Shoulders`, `Arms`, `Core`).
-   - Indexed on `category` for fast category-filtered PR queries.
+   - Index on `category` for category-filtered queries.
 
 3. **`workouts`**:
    - Represents a workout session performed on a specific `workout_date`.
    - Foreign key to `users(id)` with `ON DELETE CASCADE`.
-   - **Composite Index**: `idx_workouts_user_date (user_id, workout_date)` ensures rapid filtering of a user's chronological workouts.
+   - **Composite Index**: `idx_workouts_user_date (user_id, workout_date)` supports filtering a user's workouts in chronological order.
 
 4. **`workout_sets`**:
    - Set-level breakdown (`set_number`, `reps`, `weight_kg`).
    - **Unique Constraint**: `UNIQUE (workout_id, exercise_id, set_number)` prevents recording duplicate set numbers for the same exercise in a session.
-   - **CHECK Constraints**: `reps > 0`, `weight_kg >= 0`, `set_number > 0` enforce data sanity at the database engine level.
-   - Foreign key to `exercises(id)` uses `ON DELETE RESTRICT` to preserve historical integrity.
-   - **Composite Index**: `idx_sets_exercise_weight (exercise_id, weight_kg)` accelerates peak weight lookups for personal records.
+   - **CHECK Constraints**: `reps > 0`, `weight_kg >= 0`, `set_number > 0` enforce data sanity at the database level.
+   - Foreign key to `exercises(id)` uses `ON DELETE RESTRICT` to preserve historical data.
+   - **Composite Index**: `idx_sets_exercise_weight (exercise_id, weight_kg)` is designed for peak-weight lookups per exercise (personal records).
 
 5. **`goals`**:
-   - Tracks user fitness objectives (`weekly_workouts` frequency or `exercise_weight` 1RM target).
+   - Tracks user fitness objectives (`weekly_workouts` frequency or `exercise_weight` target).
    - Constraint `target_value > 0`.
    - Optional `exercise_id` with `ON DELETE SET NULL`.
 
 6. **`nutrition_logs`**:
-   - Preserves and persists the food tracker from the original frontend into MySQL (`name`, `protein`, `calories`, `logged_date`).
+   - Stores the food entries of the original frontend tracker in MySQL (`name`, `protein`, `calories`, `logged_date`).
 
 7. **SQL View: `weekly_summary`**:
-   - Encapsulates multi-table aggregation across `workouts` and `workout_sets`.
-   - Groups by `user_id` and Monday of each week using `DATE_SUB(workout_date, INTERVAL WEEKDAY(workout_date) DAY)` to avoid New Year split-week bugs.
+   - Encapsulates the aggregation across `workouts` and `workout_sets`.
+   - Groups by `user_id` and the Monday of each week using `DATE_SUB(workout_date, INTERVAL WEEKDAY(workout_date) DAY)`, so a week is never split across New Year.
 
 ---
 
 ## 🔍 Core SQL Queries Explained in Plain English
 
-The analytics endpoints in [`backend/routers/analytics.py`](backend/routers/analytics.py) execute **raw SQL queries** via SQLAlchemy's `text()` function with parameterized bindings to demonstrate interview-level SQL mastery.
+The CRUD endpoints use the SQLAlchemy ORM. The analytics endpoints in [`backend/routers/analytics.py`](backend/routers/analytics.py) run **raw SQL** through SQLAlchemy's `text()` with parameterized bindings.
 
 ### 1. Weekly Volume & Workout Aggregation (SQL View)
 
@@ -144,8 +145,8 @@ ORDER BY week_start_date ASC
 LIMIT :limit;
 ```
 
-* **What it does**: Queries the `weekly_summary` view to extract weekly training volume (tonnage in kg = $\sum \text{reps} \times \text{weight}$) and workout frequency.
-* **Why it matters**: Demonstrates the use of SQL Views to encapsulate complex aggregation logic (`LEFT JOIN`, `GROUP BY`, and `WEEKDAY` calculation) into a reusable reporting table.
+* **What it does**: Reads the `weekly_summary` view to get weekly training volume (`volume = SUM(reps * weight_kg)`) and workout frequency.
+* **Why a view**: The aggregation logic (`LEFT JOIN`, `GROUP BY`, `WEEKDAY` calculation) lives in one reusable place, and the query itself stays simple.
 
 ---
 
@@ -185,9 +186,9 @@ ORDER BY exercise_category ASC, exercise_name ASC;
 
 * **Plain English Explanation**:
   1. The **Common Table Expression (CTE)** `ranked_sets` joins sets, workouts, and exercises for the user.
-  2. The window function `ROW_NUMBER() OVER (PARTITION BY e.id ORDER BY s.weight_kg DESC, s.reps DESC, w.workout_date DESC)` assigns a ranking to every set per exercise. The heaviest lift gets rank 1; ties in weight are broken by the higher reps, and then by the newest date.
-  3. The outer query filters `WHERE rank_num = 1`, pulling only the single all-time peak lift for each exercise.
-  4. Also computes an estimated 1-Rep Max (1RM) using the Epley formula: $\text{weight} \times (1 + \frac{\text{reps}}{30})$.
+  2. The window function `ROW_NUMBER() OVER (PARTITION BY e.id ORDER BY s.weight_kg DESC, s.reps DESC, w.workout_date DESC)` ranks every set within each exercise. The heaviest lift gets rank 1; ties in weight are broken by more reps, then by the newest date.
+  3. The outer query keeps only `rank_num = 1`, which is the single all-time best lift for each exercise.
+  4. It also computes an estimated 1-rep max with the Epley formula: `1RM = weight * (1 + reps / 30)`.
 
 ---
 
@@ -217,13 +218,13 @@ ORDER BY workout_date ASC;
 ```
 
 * **Plain English Explanation**:
-  1. Computes the peak weight lifted for a specific exercise during each workout session.
-  2. Uses `LAG(top_weight_kg, 1) OVER (ORDER BY workout_date ASC)` to look backward one row in the ordered timeline to retrieve the weight lifted in the previous session.
-  3. Subtracts `prev_weight_kg` from `top_weight_kg` to calculate the exact weight delta ($+2.5\text{kg}$, $+5\text{kg}$, etc.), showing progressive overload without requiring expensive self-joins.
+  1. Finds the heaviest weight lifted for one exercise in each workout session.
+  2. `LAG(top_weight_kg, 1) OVER (ORDER BY workout_date ASC)` looks back one row in the date-ordered list to get the previous session's weight.
+  3. Subtracting the two gives the change between sessions (for example `+2.5 kg`), which shows progressive overload without a self-join.
 
 ---
 
-### 4. Workout Streaks (The "Gaps & Islands" SQL Problem)
+### 4. Workout Streaks (The "Gaps & Islands" Problem)
 
 ```sql
 WITH user_dates AS (
@@ -254,16 +255,15 @@ ORDER BY streak_end DESC;
 ```
 
 * **Plain English Explanation**:
-  1. **Step 1 (`user_dates`)**: Pulls distinct calendar dates on which the user worked out.
-  2. **Step 2 (`numbered_dates`)**: Assigns a sequential row number (`1, 2, 3...`) to each date ordered chronologically. Then subtracts that row number in days from the date:
-     $$\text{island\_id} = \text{workout\_date} - \text{ROW\_NUMBER}() \text{ days}$$
-     **The Key Insight**: If a user works out on consecutive calendar days (e.g., Nov 2, Nov 3, Nov 4), the `workout_date` advances by 1 day and `ROW_NUMBER()` also advances by 1. Therefore, subtracting them produces the exact same `island_id` date! When a day is missed (a gap), `workout_date` skips ahead but `ROW_NUMBER()` only increases by 1, which shifts the difference to a new `island_id`.
-  3. **Step 3 (`streak_islands`)**: Grouping by `island_id` condenses each unbroken streak into a single row with `COUNT(*) AS streak_days`.
-  4. Evaluates `MAX(streak_days)` for the all-time record, and checks if the latest island's `streak_end` includes today or yesterday for the active streak.
+  1. **Step 1 (`user_dates`)**: Gets the distinct calendar dates on which the user worked out.
+  2. **Step 2 (`numbered_dates`)**: Numbers those dates 1, 2, 3... in order, then subtracts that number of days from each date: `island_id = workout_date - ROW_NUMBER() days`.
+     **The key idea**: on consecutive days (for example Nov 2, Nov 3, Nov 4), the date goes up by 1 and the row number goes up by 1, so the subtraction gives the same `island_id` every time. When a day is skipped, the date jumps ahead but the row number only goes up by 1, so the result changes and a new `island_id` starts.
+  3. **Step 3 (`streak_islands`)**: Grouping by `island_id` turns each unbroken streak into one row, with `COUNT(*)` as the streak length.
+  4. The API uses the longest island as the all-time best streak, and checks whether the latest island ends today or yesterday to decide if a streak is currently active.
 
 ---
 
-### 5. Dynamic Goal Progress (Correlated Subqueries & Conditional Aggregation)
+### 5. Dynamic Goal Progress (Correlated Subqueries & `CASE`)
 
 ```sql
 SELECT 
@@ -297,15 +297,15 @@ ORDER BY g.status ASC, g.id DESC;
 ```
 
 * **Plain English Explanation**:
-  * Instead of maintaining redundant `current_value` columns that can drift out of sync, progress is computed live using `CASE WHEN`:
-    * For `exercise_weight`, an inline correlated subquery finds the maximum weight ever lifted for that exercise.
-    * For `weekly_workouts`, an inline correlated subquery counts distinct workouts performed since the Monday of the current week.
+  * Progress is calculated live instead of being stored in a `current_value` column, so it can never get out of sync with the workout data. A `CASE` expression picks the calculation by goal type:
+    * `exercise_weight`: a correlated subquery finds the maximum weight ever lifted for that exercise.
+    * `weekly_workouts`: a correlated subquery counts distinct workouts since the Monday of the current week.
 
 ---
 
-### 6. Atomic Transaction Management (ACID)
+### 6. Atomic Workout Saving (Transaction)
 
-In [`backend/routers/workouts.py`](backend/routers/workouts.py), creating a workout with multiple sets uses explicit transaction boundaries:
+In [`backend/routers/workouts.py`](backend/routers/workouts.py), creating a workout with multiple sets uses one transaction:
 
 ```python
 try:
@@ -324,7 +324,7 @@ except Exception as e:
     raise HTTPException(status_code=400, detail=str(e))
 ```
 
-* **Why it matters**: Guarantees database **Atomicity**. If set #4 violates a constraint (e.g. invalid exercise ID or negative reps), the entire workout is rolled back, leaving zero orphaned workout headers.
+* **Why it matters**: The workout and all of its sets are saved together or not at all (atomicity). If set #4 violates a constraint (for example an invalid exercise ID or negative reps), the whole workout is rolled back, so no empty workout header is left behind.
 
 ---
 
@@ -339,14 +339,14 @@ except Exception as e:
 | **GET** | `/api/exercises` | List exercise catalog grouped by category | No |
 | **POST** | `/api/exercises` | Create a custom exercise | Yes |
 | **GET** | `/api/workouts` | List workouts for authenticated user | Yes |
-| **POST** | `/api/workouts` | **Atomic transaction**: create workout with sets | Yes |
+| **POST** | `/api/workouts` | **Transaction**: create workout with sets | Yes |
 | **GET** | `/api/workouts/{id}` | Get workout details (user isolated) | Yes |
 | **DELETE**| `/api/workouts/{id}` | Delete workout session and cascade sets | Yes |
-| **GET** | `/api/analytics/weekly-stats` | **Raw SQL View**: weekly volume and workouts | Yes |
-| **GET** | `/api/analytics/personal-records` | **Raw SQL Window Function**: PRs via `ROW_NUMBER()` | Yes |
-| **GET** | `/api/analytics/exercise-history/{id}` | **Raw SQL Window Function**: progression via `LAG()` | Yes |
-| **GET** | `/api/analytics/streak` | **Raw SQL Gaps & Islands**: active & max streaks | Yes |
-| **GET** | `/api/analytics/goals-progress` | **Raw SQL Subqueries**: dynamic goal progress | Yes |
+| **GET** | `/api/analytics/weekly-stats` | **SQL view**: weekly volume and workouts | Yes |
+| **GET** | `/api/analytics/personal-records` | **Window function**: PRs via `ROW_NUMBER()` | Yes |
+| **GET** | `/api/analytics/exercise-history/{id}` | **Window function**: progression via `LAG()` | Yes |
+| **GET** | `/api/analytics/streak` | **Gaps & islands**: active and best streaks | Yes |
+| **GET** | `/api/analytics/goals-progress` | **Subqueries**: live goal progress | Yes |
 | **GET** | `/api/analytics/dashboard-summary` | Aggregate KPI card totals | Yes |
 | **GET** | `/api/goals` | List user goals | Yes |
 | **POST** | `/api/goals` | Create a new fitness goal | Yes |
@@ -372,16 +372,16 @@ except Exception as e:
 You have two options to initialize the MySQL database:
 
 #### Option A: One-Command Python Script (Recommended for Windows/PowerShell)
-1. Open [`backend/.env`](backend/.env) and set `DB_PASSWORD` to your local MySQL root password.
+1. Copy [`backend/.env.example`](backend/.env.example) to `backend/.env` and set `DB_PASSWORD` to your local MySQL root password.
 2. Run:
    ```bash
    cd backend
    python init_db.py
    ```
-   *This automatically creates the database, applies `schema.sql`, and populates `seed.sql`.*
+   *This creates the database, applies `schema.sql`, and loads `seed.sql`.*
 
 #### Option B: Native MySQL CLI / PowerShell
-In PowerShell, use `Get-Content` with pipe (PowerShell does not support `<` redirection):
+In PowerShell, use `Get-Content` with a pipe (PowerShell does not support `<` redirection):
 ```powershell
 # 1. Create database
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS fitness_tracker CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
@@ -411,14 +411,18 @@ Get-Content backend\seed.sql | mysql -u root -p fitness_tracker
    ```bash
    pip install -r requirements.txt
    ```
-4. Configure environment in `backend/.env` (or copy from `.env.example`):
+4. Configure environment in `backend/.env` (copy it from `.env.example`):
    ```ini
    DB_USER=root
    DB_PASSWORD=your_mysql_password
    DB_HOST=localhost
    DB_PORT=3306
    DB_NAME=fitness_tracker
-   JWT_SECRET_KEY=super-secret-fitness-jwt-key-2026-min-32-chars-interview
+   JWT_SECRET_KEY=replace-with-a-long-random-string
+   ```
+   Generate a secure secret key with:
+   ```bash
+   python -c "import secrets; print(secrets.token_hex(32))"
    ```
 5. Start the FastAPI development server:
    ```bash
@@ -444,11 +448,13 @@ Get-Content backend\seed.sql | mysql -u root -p fitness_tracker
 
 ## 👥 Demo Accounts (Pre-Seeded for Quick Testing)
 
-Both accounts are pre-configured with password: `password123`.
+Both accounts use the password: `password123`.
 
 | Username | Email | Purpose | Pre-Seeded Data |
 | :--- | :--- | :--- | :--- |
-| **`demouser`** | `demo@fitnesstracker.com` | Primary Demo Account | 4 weeks of workouts, active 4-day streak, Bench/Squat/Deadlift PRs, goals, and nutrition logs |
-| **`alex_fit`** | `alex@fitnesstracker.com` | Data Isolation Test | Separate workouts and goals to demonstrate horizontal privilege isolation |
+| **`demouser`** | `demo@fitnesstracker.com` | Primary demo account | 4 weeks of workouts, a 4-day streak, Bench/Squat/Deadlift PRs, goals, and nutrition logs |
+| **`alex_fit`** | `alex@fitnesstracker.com` | Data isolation check | Separate workouts and goals, to confirm each user only sees their own data |
 
-> **Tip for Interviewers**: Use the **`[SWITCH TO @alex_fit]`** button in the app header to instantly observe strict user data isolation in action!
+> **Note**: The seed workout dates are fixed (Oct 13 to Nov 5, 2026), so the *current* streak and this week's goal progress will show 0 after those dates. Personal records, weekly volume and the best streak are not affected.
+
+> **Demo tip**: Use the **`[SWITCH TO @alex_fit]`** button in the app header to see that each user's data is isolated.
